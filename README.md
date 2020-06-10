@@ -1,3 +1,11 @@
 # MotionPlanning
 
+This is our final project for [Probabilistic Robotics](https://courses.cs.washington.edu/courses/cse571/20sp/). We implemented 3 components for a complete navigation pipeline:
+
+- [Differentiable Particles Filter](https://arxiv.org/pdf/1805.11122.pdf) for localization.
+- [Motion Planning Networks](https://arxiv.org/pdf/1806.05767.pdf) for global path planning.
+- [Deep Deterministic Policy Gradient](https://arxiv.org/pdf/1509.02971.pdf) for local control.
+
+link to the dataset:  
 [rrt* dataset](https://drive.google.com/file/d/1vxX_vBrSBq0mhWsP4usxvzGPjFI33Grp/view?usp=sharing)
+ 
