@@ -11,7 +11,7 @@ if __name__ == "__main__":
 	dpf = DPF()
 	dpf.load()
 
-	planning_env = CarEnvironment("map/map.png")
+	planning_env = CarEnvironment("../map/map.yaml")
 	dpf.env = planning_env
 
 	particles = []

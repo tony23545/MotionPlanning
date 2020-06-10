@@ -5,7 +5,6 @@ import os, sys, random
 import numpy as np
 import _pickle as pickle 
 
-import gym
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,8 +23,8 @@ class DDPG():
 	def __init__(self, args, env = None):
 		self.args = args
 		# actor
-		self.actor = DeterministicPolicy(128)
-		self.actor_target = DeterministicPolicy(128)
+		self.actor = DeterministicPolicy(128).to(device)
+		self.actor_target = DeterministicPolicy(128).to(device)
 		self.actor_target.load_state_dict(self.actor.state_dict())
 		self.actor_optimizer = optim.Adam(self.actor.parameters(), self.args.lr)
 		# critics
@@ -40,7 +39,7 @@ class DDPG():
 		self.num_training = 0
 		self.global_steps = 0
 
-		self.action_scale = torch.FloatTensor([[20, 1]])
+		self.action_scale = torch.FloatTensor([[20, 1]]).to(device)
 		self.env = env
 		#self.load()
 
@@ -146,7 +145,7 @@ class DDPG():
 
 	def predict(self, obs, local_goal):
 		with torch.no_grad():
-			_, action = self.actor.sample(torch.FloatTensor(obs).to(device), torch.FloatTensor(local_goal).to(device))
+			action = self.actor.forward(torch.FloatTensor(obs).to(device), torch.FloatTensor(local_goal).to(device))
 		action = action.cpu().detach().numpy()[0]
 		return action
 
