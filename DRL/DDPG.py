@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from tensorboardX import SummaryWriter
 
 from utils.models import QNetwork, DeterministicPolicy
 from utils.ReplayBuffer import ReplayBuffer
@@ -43,7 +42,7 @@ class DDPG():
 
 		self.action_scale = torch.FloatTensor([[20, 1]])
 		self.env = CarEnvironment("map/map.png")
-		self.load()
+		#self.load()
 
 	def update(self):
 		for it in range(self.args.update_iteration):
@@ -100,7 +99,7 @@ class DDPG():
 				next_obs, next_goal, done, reward = self.env.step(action)
 				self.global_steps += 1
 				ep_r += reward
-				self.replay_buffer.push((obs / 4.0, local_goal / 20., next_obs / 4.0, next_goal / 20., action / self.action_scale, reward, np.float(done)))
+				self.replay_buffer.push((obs / 4.0, local_goal / 20., next_obs / 4.0, next_goal / 20., action / np.array([20, 1]), reward, np.float(done)))
 				obs = next_obs
 				local_goal = next_goal
 
@@ -125,13 +124,21 @@ class DDPG():
 			while not done:
 				with torch.no_grad():
 					# use the mean action
-					action, _ = self.actor.sample(torch.FloatTensor(obs).to(device), torch.FloatTensor(local_goal).to(device))
+					action, _ = self.actor.sample(torch.FloatTensor(obs).to(device) / 4., torch.FloatTensor(local_goal).to(device) / 20)
 					action = action.cpu().detach().numpy()[0]
+
 				
 				obs, local_goal, done, reward = self.env.step(action)
+				
+				if render:
+					self.env.render()
 				total_rews += reward
 				time_step += 1
 				if time_step > self.args.max_length_trajectory:
+					break
+				print(str(action) + "  " + str(local_goal))
+				if done:
+					print("done!")
 					break
 
 			rewards.append(total_rews)

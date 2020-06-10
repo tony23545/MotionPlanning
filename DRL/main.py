@@ -18,7 +18,7 @@ parser.add_argument('--alpha', default=0.2, type=float)
 parser.add_argument('--capacity', default=100000, type=int) # replay buffer size
 parser.add_argument('--hidden_dim', default=64, type=int)
 
-parser.add_argument('--max_episode', default=7000, type=int) # num of games
+parser.add_argument('--max_episode', default=10000, type=int) # num of games
 parser.add_argument('--last_episode', default=0, type=int)
 parser.add_argument('--max_length_trajectory', default=50, type=int)
 parser.add_argument('--print_log', default=100, type=int)
@@ -38,3 +38,6 @@ agent = DDPG(args)
 if args.mode == "train":
 	agent.train()
 else:
+	agent.load()
+	agent.env.init_visualizer()
+	agent.evaluate(10, True)

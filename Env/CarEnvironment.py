@@ -91,19 +91,19 @@ class CarEnvironment(object):
         else:
             return None, None
 
-    def step(self, x, action):
-        linear_vel = action[0]
-        steer_angle = action[1]
+    # def step(self, x, action):
+    #     linear_vel = action[0]
+    #     steer_angle = action[1]
 
-        dt = 0.1
-        L = 7.5
-        x_rollout = np.zeros_like(x)
-        x_rollout[0] = x[0] + linear_vel * np.cos(x[2]) * dt
-        x_rollout[1] = x[1] + linear_vel * np.sin(x[2]) * dt
-        x_rollout[2] = x[2] + (linear_vel/L) * np.tan(steer_angle) * dt
-        x_rollout[2] = x_rollout[2] % (2*np.pi)
+    #     dt = 0.1
+    #     L = 7.5
+    #     x_rollout = np.zeros_like(x)
+    #     x_rollout[0] = x[0] + linear_vel * np.cos(x[2]) * dt
+    #     x_rollout[1] = x[1] + linear_vel * np.sin(x[2]) * dt
+    #     x_rollout[2] = x[2] + (linear_vel/L) * np.tan(steer_angle) * dt
+    #     x_rollout[2] = x_rollout[2] % (2*np.pi)
 
-        return x_rollout
+    #     return x_rollout
 
     def angular_difference(self, start_config, end_config):
         """ Compute angular difference
@@ -224,7 +224,7 @@ class CarEnvironment(object):
         ed = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]) @ np.array([[self.radius*1.5, 0]]).T;
         ed = ed[:,0]
         car3 = ax.plot([config[1], config[1]+ed[1]], [config[0], config[0]+ed[0]], 'b-', linewidth=3)
-        return car1, car2, car3
+        return [car1, car2, car3]
 
     def init_visualizer(self):
         """ Initialize visualizer
@@ -236,6 +236,8 @@ class CarEnvironment(object):
         # Plot img
         visit_map = 1 - np.copy(self.map) # black is obstacle, white is free space
         self.ax1_img = self.ax1.imshow(visit_map, interpolation="nearest", cmap="gray")
+
+        self.car_plot = None
 
     def draw_obstacles(self, xys, *args, **kwargs):
         '''
@@ -369,12 +371,19 @@ class CarEnvironment(object):
         self.fig.canvas.draw()
         plt.pause(1e-10) 
 
-    def render(self, state, particles):
-        self.init_visualizer()
-        self.plot_car(state)
-        self.draw_particles(particles.squeeze())
+    def render(self, state = None, particles = None):
+        #self.init_visualizer()
+        if not self.car_plot is None:
+            self.car_plot[0].remove()
+            self.car_plot[1].remove()
+            self.car_plot[2][0].remove()
+        if not state is None:
+            self.car_plot = self.plot_car(state)
+        if not particles is None:
+            self.draw_particles(particles.squeeze())
+        self.car_plot = self.plot_car(self.state)
         self.fig.canvas.draw()
-        plt.show()
+        plt.pause(0.1)
 
     # MPNet steer
     def steerTo(self, state, delta):
@@ -398,27 +407,61 @@ class CarEnvironment(object):
             return rot_state_m.T[:, :2]
 
     # for reinforcement learning
-    def reset(self):
-        state = None
-        while True:
-            state = self.sample()
-            if self.state_validity_checker(state):
-                break
-        return state
+    def get_local_goal(self):
+        dxy = self.global_goal[:2, 0] - self.state[:2, 0]
+        local_goal = np.dot(np.array([[np.cos(-self.state[2, 0]), -np.sin(-self.state[2, 0])], [np.sin(-self.state[2, 0]), np.cos(-self.state[2, 0])]]), dxy[None].T)
+        return local_goal.T[0]
 
-    def step(self, state, action):
+    def reset(self):
+        # generate state
+        self.state = None
+        while True:
+            self.state = self.sample()
+            if self.state_validity_checker(self.state):
+                break
+
+        # generate goal
+        goal_dist = np.random.random()*10 + 15
+        while True:
+            angle = np.random.random() * np.pi * 2
+            self.global_goal = np.array([[self.state[0, 0] + goal_dist * np.cos(angle), self.state[1, 0] + goal_dist * np.sin(angle), 0.0]]).T
+            if self.state_validity_checker(self.global_goal):
+                break
+
+        observation = self.get_measurement(self.state)
+        local_goal = self.get_local_goal()
+        return observation, local_goal
+
+    def get_reward(self, next_state, action):
+        # reach cost
+        if self.goal_criterion(next_state, self.global_goal, pos_tor = 1, no_angle = True):
+            return 500, True # done, cost
+        # collision cost
+        if not self.state_validity_checker(next_state):
+            return -500, True
+
+        # goal distant cost
+        eps = 10
+        cost = eps * (np.linalg.norm(self.global_goal[:2] - self.state[:2]) - np.linalg.norm(self.global_goal[:2] - next_state[:2]))
+        # reach cost
+        cost -= 20
+        cost -= np.abs(action[1]) * 5
+        return cost, False
+
+    def step(self, action):
         dt = 0.1 # Step by 0.1 seconds
         L = 7.5 # Car length
-        next_state = np.zeros_like(state)
+        next_state = np.zeros_like(self.state)
 
         linear_vel, steer_angle = action[0], action[1]
-        next_state[0] = state[0] + linear_vel * np.cos(state[2]) * dt
-        next_state[1] = state[1] + linear_vel * np.sin(state[2]) * dt 
-        next_state[2] = state[2] + (linear_vel/L) * np.tan(steer_angle) * dt 
+        next_state[0] = self.state[0] + linear_vel * np.cos(self.state[2]) * dt
+        next_state[1] = self.state[1] + linear_vel * np.sin(self.state[2]) * dt 
+        next_state[2] = self.state[2] + (linear_vel/L) * np.tan(steer_angle) * dt 
         next_state[2] = next_state[2] % (2*np.pi)
 
-        obs = self.get_measurement(next_state)
+        reward, done = self.get_reward(next_state, action)
+        self.state = next_state
+        observation = self.get_measurement(self.state)
+        local_goal = self.get_local_goal()
 
-        return next_state, obs
-
-
+        return observation, local_goal, done, reward

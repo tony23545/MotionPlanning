@@ -75,8 +75,8 @@ class DeterministicPolicy(nn.Module):
 
     def sample(self, observation, goal):
         mean = self.forward(observation, goal)
-        noise = self.noise.normal_(0., std=0.5)
-        noise = noise.clamp(-0.5, 0.5)
+        noise = self.noise.normal_(0., std=0.1)
+        noise = noise.clamp(-0.1, 0.1) * self.action_scale
         action = mean + noise
         return action, mean
 
