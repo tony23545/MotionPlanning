@@ -21,7 +21,7 @@ from CarEnvironment import CarEnvironment
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 class DDPG():
-	def __init__(self, args):
+	def __init__(self, args, env = None):
 		self.args = args
 		# actor
 		self.actor = DeterministicPolicy(128)
@@ -41,7 +41,7 @@ class DDPG():
 		self.global_steps = 0
 
 		self.action_scale = torch.FloatTensor([[20, 1]])
-		self.env = CarEnvironment("map/map.png")
+		self.env = env
 		#self.load()
 
 	def update(self):
@@ -122,12 +122,12 @@ class DDPG():
 			done = False
 			obs, local_goal = self.env.reset()
 			while not done:
-				with torch.no_grad():
-					# use the mean action
-					action, _ = self.actor.sample(torch.FloatTensor(obs).to(device) / 4., torch.FloatTensor(local_goal).to(device) / 20)
-					action = action.cpu().detach().numpy()[0]
+				action = self.predict(obs / 4., local_goal / 20.)
+				# with torch.no_grad():
+				# 	# use the mean action
+				# 	_, action = self.actor.sample(torch.FloatTensor(obs).to(device) / 4., torch.FloatTensor(local_goal).to(device) / 20)
+				# 	action = action.cpu().detach().numpy()[0]
 
-				
 				obs, local_goal, done, reward = self.env.step(action)
 				
 				if render:
@@ -136,14 +136,19 @@ class DDPG():
 				time_step += 1
 				if time_step > self.args.max_length_trajectory:
 					break
-				print(str(action) + "  " + str(local_goal))
+				#print(str(action) + "  " + str(local_goal))
 				if done:
-					print("done!")
 					break
 
 			rewards.append(total_rews)
 		rewards = np.array(rewards)
 		print("mean reward {}, max reward {}, min reward {}".format(rewards.mean(), rewards.max(), rewards.min()))
+
+	def predict(self, obs, local_goal):
+		with torch.no_grad():
+			_, action = self.actor.sample(torch.FloatTensor(obs).to(device), torch.FloatTensor(local_goal).to(device))
+		action = action.cpu().detach().numpy()[0]
+		return action
 
 	def load(self, episode = None):
 		file_name = "weights/DDPG.pt"

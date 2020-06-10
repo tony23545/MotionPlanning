@@ -33,7 +33,8 @@ parser.add_argument('--seed', default=0, type=int)
 parser.add_argument('--exp_name', default='experiment')
 args = parser.parse_args()
 
-agent = DDPG(args)
+planning_env = CarEnvironment("../map/map.yaml")
+agent = DDPG(args, planning_env)
 
 if args.mode == "train":
 	agent.train()

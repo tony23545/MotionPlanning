@@ -1,6 +1,7 @@
 import numpy as np
 from matplotlib import pyplot as plt
 from map_utils import depth_to_xy, Map
+import os
 
 class CarEnvironment(object):
     """ Car Environment. Car is represented as a circular robot.
@@ -15,8 +16,7 @@ class CarEnvironment(object):
 
         # Obtain the boundary limits.
         # Check if file exists.
-        
-        self.m = Map('../map/map.yaml', laser_max_range=4, downsample_factor=1)
+        self.m = Map(mapfile, laser_max_range=4, downsample_factor=1)
         self.map = self.m.occupancy_grid / 255.
         self.xlimit = [0, np.shape(self.map)[0]-1]
         self.ylimit = [0, np.shape(self.map)[1]-1]
@@ -229,7 +229,6 @@ class CarEnvironment(object):
     def init_visualizer(self):
         """ Initialize visualizer
         """
-
         self.fig = plt.figure()
         self.ax1 = self.fig.add_subplot(1, 1, 1)
 
@@ -371,7 +370,7 @@ class CarEnvironment(object):
         self.fig.canvas.draw()
         plt.pause(1e-10) 
 
-    def render(self, state = None, particles = None):
+    def render(self, state = None, particles = None, dt = 0.01):
         #self.init_visualizer()
         if not self.car_plot is None:
             self.car_plot[0].remove()
@@ -383,7 +382,7 @@ class CarEnvironment(object):
             self.draw_particles(particles.squeeze())
         self.car_plot = self.plot_car(self.state)
         self.fig.canvas.draw()
-        plt.pause(0.1)
+        plt.pause(dt)
 
     # MPNet steer
     def steerTo(self, state, delta):
@@ -465,3 +464,31 @@ class CarEnvironment(object):
         local_goal = self.get_local_goal()
 
         return observation, local_goal, done, reward
+
+    # purely update state
+    def step_action(self, action):
+        dt = 0.1 # Step by 0.1 seconds
+        L = 7.5 # Car length
+        next_state = np.zeros_like(self.state)
+
+        linear_vel, steer_angle = action[0], action[1]
+        next_state[0] = self.state[0] + linear_vel * np.cos(self.state[2]) * dt
+        next_state[1] = self.state[1] + linear_vel * np.sin(self.state[2]) * dt 
+        next_state[2] = self.state[2] + (linear_vel/L) * np.tan(steer_angle) * dt 
+        next_state[2] = next_state[2] % (2*np.pi)
+
+        self.state = next_state
+        return self.state
+
+    # for close loop
+    def draw_start_goal(self, start, goal):
+        ax = plt.gca()
+        circle1 = plt.Circle(start[::-1], self.radius, fill=True, facecolor='g')
+        circle2 = plt.Circle(goal[::-1], self.radius, fill=True, facecolor='r')
+        ax.add_artist(circle1)
+        ax.add_artist(circle2)
+        plt.pause(0.0001)
+
+    def setState(self, state):
+        self.state = state
+
