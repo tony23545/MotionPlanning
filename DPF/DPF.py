@@ -6,10 +6,6 @@ from torch.utils.data import Dataset, DataLoader
 from PFDataset import PFDataset
 import os
 
-import sys
-sys.path.append('../Env')
-from CarEnvironment import CarEnvironment
-
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
@@ -41,6 +37,11 @@ class DPF():
 									 nn.PReLU(),
 									 nn.Linear(128, 64)).to(device)
 		self.encoder_optimizer = torch.optim.Adam(self.encoder.parameters(), lr = self.learning_rate)
+
+		self.state_encoder = nn.Sequential(nn.Linear(self.state_dim, 32),
+										   nn.PReLU(),
+										   nn.Linear(32, 64)).to(device)
+		self.state_encoder_optimizer = torch.optim.Adam(self.state_encoder.parameters(), lr = self.learning_rate)
 
 		# observation likelihood estimator that maps states and observation encodings to probabilities
 		self.obs_like_estimator = nn.Sequential(nn.Linear(64+64, 128),
@@ -82,7 +83,7 @@ class DPF():
 										   nn.PReLU(),
 										   nn.Linear(128, 64),
 										   nn.PReLU(),
-										   nn.Linear(64, 3),
+										   nn.Linear(64, self.particle_dim),
 										   nn.Tanh()).to(device)
 		self.dynamic_model_optimizer = torch.optim.Adam(self.dynamic_model.parameters(), lr = self.learning_rate)
 
@@ -92,14 +93,14 @@ class DPF():
 							torch.cos(particles[..., 2:])), axis = -1)
 		return inputs
 
-	def measurement_update(self, encoding, particle_encoding):
+	def measurement_update(self, encoding, particles):
 		'''
 		Compute the likelihood of the encoded observation for each particle.
 		'''
-		#particle_input = self.transform_particles_as_input(particles)
-		encoding_input = encoding[:, None, :].repeat((1, particle_encoding.shape[1], 1))
-		#state_encoding = self.state_encoder(particle_input)
-		inputs = torch.cat((particle_encoding, encoding_input), axis = -1)
+		particle_input = self.transform_particles_as_input(particles)
+		encoding_input = encoding[:, None, :].repeat((1, particle_input.shape[1], 1))
+		state_encoding = self.state_encoder(particle_input)
+		inputs = torch.cat((state_encoding, encoding_input), axis = -1)
 		obs_likelihood = self.obs_like_estimator(inputs)
 		return obs_likelihood 
 
@@ -171,6 +172,23 @@ class DPF():
 
 		return particles_resampled, particle_probs_resampled
 
+	def propose_batch(self, observation, num_proposed = 100):
+		with torch.no_grad():
+			encoding = self.encoder(torch.FloatTensor(observation / 4.0).to(device))
+			particles_proposed = []
+			scale = self.state_scale.cpu()
+			while True:
+				prop = self.propose_particles(encoding, num_proposed*2)
+				for k in range(prop.shape[0]):
+					if self.env.state_validity_checker((prop[:, k] * scale).numpy().T):
+						particles_proposed.append(prop[0, k])
+					if len(particles_proposed) >= num_proposed:
+						break
+				if len(particles_proposed) >= num_proposed:
+					break
+			particles_proposed = torch.stack(particles_proposed)[None, ...]
+			return particles_proposed
+
 	def loop(self, particles, particle_probs, actions, observation, training = False):
 		encoding = self.encoder(observation)
 
@@ -180,13 +198,13 @@ class DPF():
 
 		# observation update
 		likelihood = (self.measurement_update(encoding, particles).squeeze()+1e-16)
-		print(likelihood.max())
+		#print(likelihood.max())
 		particle_probs = particle_probs * likelihood # unnormalized
 
-		if likelihood.max() < 0.95:
-			propose_ratio = 0.5
+		if likelihood.max() < 0.9:
+			propose_ratio = 0.3
 		else:
-			propose_ratio = 0.05
+			propose_ratio = 0.00
 
 		num_proposed = int(self.particle_num * propose_ratio)
 		num_resampled = self.particle_num - num_proposed
@@ -228,7 +246,6 @@ class DPF():
 		#TODO can train dynamic and measurement at the same time...
 		print("training motion model...")
 		#self.load()
-		
 		for it in range(max_iter):
 			total_loss = []
 			for _, (states, actions, measurements, next_states, deltas) in enumerate(loader):
@@ -239,7 +256,6 @@ class DPF():
 				states = states[:, None, :]
 
 				delta_pred = self.motion_update(states, actions, training = True)
-
 				dynamic_loss = mseLoss(delta_pred.squeeze(), deltas)
 
 				self.mo_noise_generator_optimizer.zero_grad()
@@ -256,14 +272,12 @@ class DPF():
 			total_loss = []
 			for _, (states, actions, measurements, next_states, deltas) in enumerate(loader):
 				batch_size = states.shape[0]
-				particle_obs = torch.FloatTensor(self.env.get_measurement((next_states * self.state_scale.cpu()).numpy().T))
-				particle_encoding = self.encoder(particle_obs.to(device) / 4.0)
-				particle_encoding = particle_encoding[None, ...].repeat(batch_size, 1, 1)
+
 				state_repeat = next_states[None, ...].repeat(batch_size, 1, 1)
 				state_repeat = state_repeat.float().to(device)
 				measurements = measurements.float().to(device)
 				encoding = self.encoder(measurements)
-				measurement_model_out = self.measurement_update(encoding, particle_encoding).squeeze().cpu()
+				measurement_model_out = self.measurement_update(encoding, state_repeat).squeeze().cpu()
 
 				# measure_loss = -torch.mul(torch.eye(batch_size), torch.log(measurement_model_out + 1e-16))/batch_size -  \
 				# 				torch.mul(1.0-torch.eye(batch_size), torch.log(1.0-measurement_model_out + 1e-16))/(batch_size**2-batch_size)
@@ -277,9 +291,11 @@ class DPF():
 				measure_loss_mean = measure_loss.sum()
 
 				self.encoder_optimizer.zero_grad()
+				self.state_encoder_optimizer.zero_grad()
 				self.obs_like_estimator_optimizer.zero_grad()
 				measure_loss_mean.backward()
 				self.encoder_optimizer.step()
+				self.state_encoder_optimizer.step()
 				self.obs_like_estimator_optimizer.step()
 				total_loss.append(measure_loss_mean.detach().cpu().numpy())
 			print("epoch: %d, loss: %2.6f" % (it, np.mean(total_loss)))
@@ -368,26 +384,27 @@ class DPF():
 
 		return (new_particles * self.state_scale).cpu(), self.particle_probs.cpu()
 
-	def load(self):
+	def load(self, file_name = None):
 		try:
-			if not os.path.exists("../weights/"):
-				os.mkdir("../weights/")
-			file_name = "../weights/DPF.pt"
+			if file_name is None:
+				file_name = "weights/DPFfocal.pt"
 			checkpoint = torch.load(file_name)
 			self.encoder.load_state_dict(checkpoint["encoder"])
+			self.state_encoder.load_state_dict(checkpoint["state_encoder"])
 			self.obs_like_estimator.load_state_dict(checkpoint["obs_like_estimator"])
 			self.particle_proposer.load_state_dict(checkpoint["particle_proposer"])
 			self.mo_noise_generator.load_state_dict(checkpoint["mo_noise_generator"])
 			self.dynamic_model.load_state_dict(checkpoint["dynamic_model"])
 			print("load model from " + file_name)
 		except:
-			print("fail to load model!")
+			print("fail to load model! ")
 
 	def save(self):
-		if not os.path.exists("../weights/"):
-			os.mkdir("../weights/")
-		file_name = "../weights/DPF.pt"
+		if not os.path.exists("weights/"):
+			os.mkdir("weights/")
+		file_name = "weights/DPFfocal.pt"
 		torch.save({"encoder" : self.encoder.state_dict(),
+					"state_encoder" : self.state_encoder.state_dict(),
 					"obs_like_estimator" : self.obs_like_estimator.state_dict(),
 					"particle_proposer" : self.particle_proposer.state_dict(),
 					"mo_noise_generator" : self.mo_noise_generator.state_dict(),
@@ -398,10 +415,9 @@ if __name__ == "__main__":
 	dataset = PFDataset()
 	loader = DataLoader(dataset, batch_size = 64, shuffle = True, num_workers = 4)
 
-	planning_env = CarEnvironment("../map/map.yaml")
-	dpf = DPF(env = planning_env)
-	dpf.save()
-	for i in range(5):
-		dpf.train(loader, 20)
+	dpf = DPF()
+	dpf.load()
+	for i in range(1):
+		dpf.train(loader, 50)
 		dpf.save()
 

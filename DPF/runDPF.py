@@ -10,7 +10,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 if __name__ == "__main__":
 	
 	dpf = DPF()
-	dpf.load()
+	dpf.load("../weights/DPFfocal.pt")
 
 	planning_env = CarEnvironment("../map/map.yaml")
 	planning_env.init_visualizer()
@@ -37,14 +37,13 @@ if __name__ == "__main__":
 
 
 	#particles = state.repeat(16, axis = 1).T
-	dpf.initial_particles(particles)
-
-	for i in range(15):
-		action = planning_env.sample_action()
+	dpf.initial_particles(particles_pro)
+	action = planning_env.sample_action()
+	for i in range(50):
 		state, obs = planning_env.step_action(action)
 		next_, prob = dpf.update(action, obs)
 		pred = (next_ * prob[..., None]).sum(axis = 1)
-		planning_env.render(state, dpf.particles.cpu().numpy()*np.array([1788, 1240, 1.0]))
-		import IPython
-		IPython.embed()
+		print(np.linalg.norm(state.T - pred.numpy()))
+		planning_env.render(particles = dpf.particles.cpu().numpy()*np.array([1788, 1240, 1.0]), dt = 0.5)
+
 

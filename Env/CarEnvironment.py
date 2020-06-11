@@ -237,6 +237,7 @@ class CarEnvironment(object):
         self.ax1_img = self.ax1.imshow(visit_map, interpolation="nearest", cmap="gray")
 
         self.car_plot = None
+        self.particle_plot = None
 
     def draw_obstacles(self, xys, *args, **kwargs):
         '''
@@ -248,13 +249,15 @@ class CarEnvironment(object):
     def draw_particles(self, particles, *args, **kwargs):
         x = particles[:, 0]
         y = particles[:, 1]
-        delta = 10
-        xd = np.cos(particles[:, 2])*delta 
-        yd = np.sin(particles[:, 2])*delta 
+        # delta = 10
+        # xd = np.cos(particles[:, 2])*delta 
+        # yd = np.sin(particles[:, 2])*delta 
+        particle_plot = self.ax1.scatter(y, x, s = 0.1)
 
-        for i in range(x.shape[0]):
-            self.ax1.arrow(y[i], x[i], yd[i], xd[i], color = 'r', head_width = 5, head_length = 5)
+        # for i in range(x.shape[0]):
+        #     self.ax1.arrow(y[i], x[i], yd[i], xd[i], color = 'r', head_width = 5, head_length = 5)
         self.fig.canvas.draw()
+        return particle_plot
         
 
     def visualize_plan(self, plan=None, tree=None, visited=None):
@@ -376,10 +379,12 @@ class CarEnvironment(object):
             self.car_plot[0].remove()
             self.car_plot[1].remove()
             self.car_plot[2][0].remove()
+        if not self.particle_plot is None:
+            self.particle_plot.remove()
         if not state is None:
             self.car_plot = self.plot_car(state)
         if not particles is None:
-            self.draw_particles(particles.squeeze())
+            self.particle_plot = self.draw_particles(particles.squeeze())
         self.car_plot = self.plot_car(self.state)
         self.fig.canvas.draw()
         plt.pause(dt)
@@ -492,4 +497,5 @@ class CarEnvironment(object):
 
     def setState(self, state):
         self.state = state
+        return self.get_measurement(state)
 

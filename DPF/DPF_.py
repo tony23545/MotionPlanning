@@ -6,10 +6,15 @@ from torch.utils.data import Dataset, DataLoader
 from PFDataset import PFDataset
 import os
 
+import sys
+sys.path.append('../Env')
+from CarEnvironment import CarEnvironment
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print(device)
 
 class DPF():
-	def __init__(self, particle_dim = 3, action_dim = 2, observation_dim = 180, particle_num = 16):
+	def __init__(self, particle_dim = 3, action_dim = 2, observation_dim = 180, particle_num = 16, env = None):
 		self.particle_dim = particle_dim
 		self.state_dim = 4 # augmented state dim
 		self.action_dim = action_dim
@@ -19,12 +24,12 @@ class DPF():
 		self.learning_rate = 0.0001
 		self.propose_ratio = 0.0
 
-		self.state_scale = np.array([1788, 1240, 1.0])# not scaling angle, use sin and cos
-		self.action_scale = np.array([20, 1.0])
+		self.state_scale = torch.FloatTensor([1788.0, 1240.0, 1.0]).to(device)# not scaling angle, use sin and cos
+		self.action_scale = torch.FloatTensor([20.0, 1.0]).to(device)
 		self.observation_scale = 4.0
-		self.delta_pos_scale = np.array([1788, 1240, 2.0]) / 2.0
-		self.delta_angle_scale = 1. / (20/7.5*np.tan(1.0)*0.1)
-		self.env = None
+		self.delta_scale = torch.FloatTensor([2.0, 2.0, 20/7.5*np.tan(1.0)*0.1]).to(device)
+
+		self.env = env
 
 		self.build_model()
 
@@ -37,9 +42,10 @@ class DPF():
 									 nn.Linear(128, 64)).to(device)
 		self.encoder_optimizer = torch.optim.Adam(self.encoder.parameters(), lr = self.learning_rate)
 
-
 		# observation likelihood estimator that maps states and observation encodings to probabilities
-		self.obs_like_estimator = nn.Sequential(nn.Linear(self.state_dim+64, 128),
+		self.obs_like_estimator = nn.Sequential(nn.Linear(64+64, 128),
+												nn.PReLU(),
+												nn.Linear(128, 128),
 												nn.PReLU(),
 												nn.Linear(128, 64),
 												nn.PReLU(),
@@ -48,7 +54,7 @@ class DPF():
 		self.obs_like_estimator_optimizer = torch.optim.Adam(self.obs_like_estimator.parameters(), lr = self.learning_rate)
 
 		# particle proposer that maps encodings to particles
-		self.particle_proposer = nn.Sequential(nn.Linear(64, 128),
+		self.particle_proposer = nn.Sequential(nn.Linear(180, 128),
 											   nn.PReLU(),
 											   nn.Linear(128, 128),
 											   nn.PReLU(),
@@ -56,7 +62,7 @@ class DPF():
 											   nn.PReLU(),
 											   nn.Linear(128, 64),
 											   nn.PReLU(),
-											   nn.Dropout(p=0.2),
+											   nn.Dropout(p=0.3),
 											   nn.Linear(64, self.state_dim)).to(device)
 		self.particle_proposer_optimizer = torch.optim.Adam(self.particle_proposer.parameters(), lr = self.learning_rate)
 
@@ -76,7 +82,7 @@ class DPF():
 										   nn.PReLU(),
 										   nn.Linear(128, 64),
 										   nn.PReLU(),
-										   nn.Linear(64, self.particle_dim),
+										   nn.Linear(64, 3),
 										   nn.Tanh()).to(device)
 		self.dynamic_model_optimizer = torch.optim.Adam(self.dynamic_model.parameters(), lr = self.learning_rate)
 
@@ -86,29 +92,22 @@ class DPF():
 							torch.cos(particles[..., 2:])), axis = -1)
 		return inputs
 
-	def measurement_update(self, encoding, particles):
+	def measurement_update(self, encoding, particle_encoding):
 		'''
 		Compute the likelihood of the encoded observation for each particle.
 		'''
-		particle_input = self.transform_particles_as_input(particles)
-		encoding_input = encoding[:, None, :].repeat((1, particle_input.shape[1], 1))
-		inputs = torch.cat((particle_input, encoding_input), axis = -1)
+		#particle_input = self.transform_particles_as_input(particles)
+		encoding_input = encoding[:, None, :].repeat((1, particle_encoding.shape[1], 1))
+		#state_encoding = self.state_encoder(particle_input)
+		inputs = torch.cat((particle_encoding, encoding_input), axis = -1)
 		obs_likelihood = self.obs_like_estimator(inputs)
 		return obs_likelihood 
-
-	def propose_particles(self, encoding, num_particles):
-		duplicated_encoding = encoding[:, None, :].repeat((1, num_particles, 1)).to(device)
-		proposed_particles = self.particle_proposer(duplicated_encoding).cpu()
-		proposed_particles = torch.cat((proposed_particles[..., :2],
-										torch.atan2(proposed_particles[..., 2:3], proposed_particles[..., 3:4])), axis = -1)
-		proposed_particles[..., 2] = proposed_particles[..., 2] + np.pi
-		return proposed_particles
 
 	def motion_update(self, particles, action, training = False):
 		action = action[:, None, :]
 		action_input = action.repeat((1, particles.shape[1], 1))
-		random_input = torch.rand(action_input.shape)[..., :1]
-		action_random = torch.cat((action_input, random_input), axis = -1).to(device)
+		random_input = torch.rand(action_input.shape)[..., :1].to(device)
+		action_random = torch.cat((action_input, random_input), axis = -1)
 		
 		# estimate action noise
 		delta = self.mo_noise_generator(action_random)
@@ -121,77 +120,109 @@ class DPF():
 		state_delta = self.dynamic_model(inputs)
 		return state_delta
 
-	def permute_batch(self, x, samples):
-		# get shape
-		batch_size = x.shape[0]
-		num_particles = x.shape[1]
-		sample_size = samples.shape[1]
-		# compute 1D indices into the 2D array
-		idx = samples + num_particles*torch.arange(batch_size)[:, None].repeat((1, sample_size))
-		result = x.view(batch_size*num_particles, -1)[idx, :]
-		return result
+	def propose_particles(self, encoding, num_particles):
+		duplicated_encoding = encoding[:, None, :].repeat((1, num_particles, 1)).to(device)
+		proposed_particles = self.particle_proposer(duplicated_encoding).cpu()
+		proposed_particles[..., :2] = torch.sigmoid(proposed_particles[..., :2])
+		proposed_particles[..., 2:] = torch.tanh(proposed_particles[..., 2:])
+		proposed_particles = torch.cat((proposed_particles[..., :2],
+										torch.atan2(proposed_particles[..., 2:3], proposed_particles[..., 3:4])), axis = -1)
+		proposed_particles[..., 2] = proposed_particles[..., 2] + np.pi
+		return proposed_particles
 
-	def loop(self, particles, particle_probs_, actions, imgs, training = False):
-		encoding = self.encoder(imgs)
-		num_proposed = int(self.particle_num * self.propose_ratio)
-		num_resampled = self.particle_num - num_proposed
-		batch_size = encoding.shape[0]
+	def resample(self, particles, particle_probs, alpha, num_resampled):
+		'''
+		particle_probs in log space, unnormalized
+		'''
+		assert 0.0 < alpha <= 1.0
+		batch_size = particles.shape[0]		
 
-		if self.propose_ratio == 0:
-			#standard_particles = particles
-			#standard_particles_probs = particle_probs_
-			# motion update
-			
-			standard_particles = self.motion_update(particles, actions, training) + particles
+		# normalize
+		particle_probs = particle_probs / particle_probs.sum(dim = -1, keepdim = True)
+		uniform_probs = torch.ones((batch_size, self.particle_num)).to(device) / self.particle_num
 
-			# measurement update
-			likelihood = (self.measurement_update(encoding, standard_particles).squeeze()+1e-16)
-			standard_particles_probs = likelihood * particle_probs_
-		elif self.propose_ratio < 1.0:
-			# resampling
-			basic_markers = torch.linspace(0.0, (num_resampled-1.0)/num_resampled, num_resampled)
-			random_offset = torch.FloatTensor(batch_size).uniform_(0.0, 1.0/num_resampled)
-			markers = random_offset[:, None] + basic_markers[None, :] # shape: batch_size * num_resampled
-			cum_probs = torch.cumsum(particle_probs_, axis = 1)
-			markers = markers.to(device)
-			marker_matching = markers[:, :, None] > cum_probs[:, None, :] # shape: batch_size * num_resampled * num_particles
-			#samples = marker_matching.int().argmax(axis = 2).int()
-			samples = marker_matching.sum(axis = 2).int()
-			#print(samples)
-			standard_particles = self.permute_batch(particles, samples)
-			standard_particles_probs = torch.ones((batch_size, num_resampled)).to(device)
-
-			# motion update
-			standard_particles = self.motion_update(standard_particles, actions, training) + standard_particles
-
-			# measurement update
-			standard_particles_probs *= (self.measurement_update(encoding, standard_particles).squeeze()+1e-16)
-
-		if self.propose_ratio > 0.0:
-			# propose new particles
-
-			proposed_particles = self.propose_particles(encoding.detach(), num_proposed)
-			proposed_particles_probs = torch.ones((batch_size, num_proposed)).to(device)
-
-		# normalize and combine particles
-		if self.propose_ratio == 1.0:
-			particles = propose_particles
-			particle_probs = proposed_particles_probs
-
-		elif self.propose_ratio == 0.0:
-			particles = standard_particles
-			particle_probs = standard_particles_probs
-
+		# bulid up sampling distribution q(s)
+		if alpha < 1.0:
+			# soft resampling
+			q_probs = torch.stack((particle_probs*alpha, uniform_probs*(1.0-alpha)), dim = -1).to(device)
+			q_probs = q_probs.sum(dim = -1)
+			q_probs = q_probs / q_probs.sum(dim = -1, keepdim = True)
+			particle_probs = particle_probs / q_probs
 		else:
-			standard_particles_probs *= (1.0 * num_resampled / self.particle_num / standard_particles_probs.sum(axis = 1, keepdim=True))
-			proposed_particles_probs *= (1.0 * num_proposed / self.particle_num / proposed_particles_probs.sum(axis = 1, keepdim=True))
-			particles = torch.cat((standard_particles, proposed_particles), axis = 1)
-			particle_probs = torch.cat((standard_particles_probs, proposed_particles_probs), axis = 1)
+			# hard resampling
+			q_probs = particle_probs
+			particle_probs = uniform_probs
 
-		# normalize probabilities
-		particle_probs /= (particle_probs.sum(axis = 1, keepdim = True))
-	
-		return particles, particle_probs
+		# sample particle indices according to q(s)
+
+		basic_markers = torch.linspace(0.0, (num_resampled-1.0)/num_resampled, num_resampled)
+		random_offset = torch.FloatTensor(batch_size).uniform_(0.0, 1.0/num_resampled)
+		markers = random_offset[:, None] + basic_markers[None, :] # shape: batch_size * num_resampled
+		cum_probs = torch.cumsum(q_probs, axis = 1)
+		markers = markers.to(device)
+		marker_matching = markers[:, :, None] > cum_probs[:, None, :]
+		samples = marker_matching.sum(axis = 2).int()
+
+		idx = samples + self.particle_num*torch.arange(batch_size)[:, None].repeat((1, num_resampled)).to(device)
+		particles_resampled = particles.view((batch_size * self.particle_num, -1))[idx, :]
+		particle_probs_resampled = particle_probs.view((batch_size * self.particle_num, ))[idx]
+		particle_probs_resampled = particle_probs_resampled / particle_probs_resampled.sum(dim = -1, keepdim = True)
+
+
+		return particles_resampled, particle_probs_resampled
+
+	def loop(self, particles, particle_probs, actions, observation, training = False):
+		encoding = self.encoder(observation)
+
+		# motion update
+		deltas = self.motion_update(particles, actions)
+		particles = particles + deltas * self.delta_scale / self.state_scale
+
+		# observation update
+		particle_obs = self.env.get_measurement(particles.cpu().numpy()[0].T)
+		particle_obs_encoding = self.encoder(torch.FloatTensor(particle_obs).to(device))
+
+		likelihood = (self.measurement_update(encoding, particle_obs_encoding[None]).squeeze()+1e-16)
+		print(likelihood.max())
+		particle_probs = particle_probs * likelihood # unnormalized
+
+		if likelihood.max() < 0.95:
+			propose_ratio = 0.5
+		else:
+			propose_ratio = 0.05
+
+		num_proposed = int(self.particle_num * propose_ratio)
+		num_resampled = self.particle_num - num_proposed
+
+		# resample
+		alpha = 0.8
+		particles_resampled, particle_probs_resampled = self.resample(particles, particle_probs, alpha, num_resampled)
+
+		# propose
+		if num_proposed > 0:
+			particles_proposed = []
+			scale = self.state_scale.cpu()
+			while True:
+				prop = self.propose_particles(encoding, num_proposed*2)
+				for k in range(prop.shape[0]):
+					if self.env.state_validity_checker((prop[:, k] * scale).numpy().T):
+						particles_proposed.append(prop[0, k])
+					if len(particles_proposed) >= num_proposed:
+						break
+				if len(particles_proposed) >= num_proposed:
+					break
+			particles_proposed = torch.stack(particles_proposed)[None, ...].to(device)
+
+			particle_probs_proposed = torch.ones([particles_proposed.shape[0], particles_proposed.shape[1]]) / particles_proposed.shape[1]
+			particle_probs_proposed = particle_probs_proposed.to(device)
+
+			# combine
+			particles = torch.cat((particles_resampled, particles_proposed), axis = 1)
+			particle_probs = torch.cat((particle_probs_resampled, particle_probs_proposed), axis = -1)
+			particle_probs = particle_probs / particle_probs.sum(dim = -1, keepdim = True)
+			return particles, particle_probs
+		else:
+			return particles_resampled, particle_probs_resampled
 
 	def train(self, loader, max_iter=1000):
 		# no motion model here...
@@ -200,15 +231,18 @@ class DPF():
 		#TODO can train dynamic and measurement at the same time...
 		print("training motion model...")
 		#self.load()
+		'''
 		for it in range(max_iter):
 			total_loss = []
 			for _, (states, actions, measurements, next_states, deltas) in enumerate(loader):
 				states = states.float().to(device)
 				actions = actions.float().to(device)
+				next_states = next_states.float().to(device)
 				deltas = deltas.float().to(device)
 				states = states[:, None, :]
 
 				delta_pred = self.motion_update(states, actions, training = True)
+
 				dynamic_loss = mseLoss(delta_pred.squeeze(), deltas)
 
 				self.mo_noise_generator_optimizer.zero_grad()
@@ -216,26 +250,33 @@ class DPF():
 				dynamic_loss.backward()
 				self.mo_noise_generator_optimizer.step()
 				self.dynamic_model_optimizer.step()
-				total_loss.append(dynamic_loss.detach().numpy())
-				self.dynamic_model_optimizer.step()
-				total_loss.append(dynamic_loss.detach().numpy())
+				total_loss.append(dynamic_loss.detach().cpu().numpy())
 			print("epoch: %d, loss: %2.6f" % (it, np.mean(total_loss)))
-
+		
 		# train measurement model
 		print("training measurement model...")
 		for it in range(max_iter):
 			total_loss = []
 			for _, (states, actions, measurements, next_states, deltas) in enumerate(loader):
 				batch_size = states.shape[0]
-
+				particle_obs = torch.FloatTensor(self.env.get_measurement((next_states * self.state_scale.cpu()).numpy().T))
+				particle_encoding = self.encoder(particle_obs.to(device) / 4.0)
+				particle_encoding = particle_encoding[None, ...].repeat(batch_size, 1, 1)
 				state_repeat = next_states[None, ...].repeat(batch_size, 1, 1)
 				state_repeat = state_repeat.float().to(device)
 				measurements = measurements.float().to(device)
 				encoding = self.encoder(measurements)
-				measurement_model_out = self.measurement_update(encoding, state_repeat).squeeze()
+				measurement_model_out = self.measurement_update(encoding, particle_encoding).squeeze().cpu()
 
-				measure_loss = -torch.mul(torch.eye(batch_size), torch.log(measurement_model_out + 1e-16))/batch_size -  \
-								torch.mul(1.0-torch.eye(batch_size), torch.log(1.0-measurement_model_out + 1e-16))/(batch_size**2-batch_size)
+				# measure_loss = -torch.mul(torch.eye(batch_size), torch.log(measurement_model_out + 1e-16))/batch_size -  \
+				# 				torch.mul(1.0-torch.eye(batch_size), torch.log(1.0-measurement_model_out + 1e-16))/(batch_size**2-batch_size)
+				# measure_loss_mean = measure_loss.sum()
+
+				# measure_loss = -torch.mul(torch.eye(batch_size), torch.log(measurement_model_out + 1e-16))/batch_size -  \
+				# 				torch.mul(1.0-torch.eye(batch_size), torch.log(1.0-measurement_model_out + 1e-16))/(batch_size**2-batch_size)
+				measure_loss = -torch.mul(torch.mul(torch.eye(batch_size), torch.pow(1.0-measurement_model_out, 2.0)), torch.log(measurement_model_out + 1e-16))/batch_size - \
+								torch.mul(torch.mul(1.0-torch.eye(batch_size), torch.pow(measurement_model_out, 2.0)), torch.log(1.0-measurement_model_out + 1e-16))/(batch_size**2-batch_size)
+
 				measure_loss_mean = measure_loss.sum()
 
 				self.encoder_optimizer.zero_grad()
@@ -243,9 +284,9 @@ class DPF():
 				measure_loss_mean.backward()
 				self.encoder_optimizer.step()
 				self.obs_like_estimator_optimizer.step()
-				total_loss.append(measure_loss_mean.detach().numpy())
+				total_loss.append(measure_loss_mean.detach().cpu().numpy())
 			print("epoch: %d, loss: %2.6f" % (it, np.mean(total_loss)))
-
+		'''
 		# train particle proposer
 		print("training proposer...")
 		for it in range(max_iter):
@@ -253,22 +294,23 @@ class DPF():
 			for _, (states, actions, measurements, next_states, deltas) in enumerate(loader):
 				
 				measurements = measurements.float().to(device)
-				encoding = self.encoder(measurements).detach()
+				#encoding = self.encoder(measurements).detach()
+				# import IPython
+				# IPython.embed()
 
-				proposed_particles = self.propose_particles(encoding, self.particle_num)
+				proposed_particles = self.propose_particles(measurements, self.particle_num)
 
 				state_repeat = next_states[:, None, :].repeat((1, self.particle_num, 1))
-				state_repeat[..., 2] = state_repeat[..., 2]
+				#state_repeat[..., 2] = state_repeat[..., 2]
 				std = 0.2
 				sq_distance = (proposed_particles - state_repeat).pow(2).sum(axis = -1)
 				activations = 1.0 / np.sqrt(2.0*np.pi*std**2) * torch.exp(-sq_distance / (2.0*std**2))
-				proposer_loss = -torch.log(1e-16 + activations.mean(axis = -1)).mean()
+				proposer_loss = -torch.log(1e-16 + activations.sum(axis = -1)).mean()
 				self.particle_proposer_optimizer.zero_grad()
 				proposer_loss.backward()
 				self.particle_proposer_optimizer.step()
-				total_loss.append(proposer_loss.detach().numpy())
+				total_loss.append(proposer_loss.detach().cpu().numpy())
 			print("epoch: %d, loss: %2.6f" % (it, np.mean(total_loss)))
-		self.save()
 
 		# # end to end training
 		# print("end to end training...")
@@ -297,7 +339,6 @@ class DPF():
 		# 		e2e_loss = -torch.log(1e-16 + activations.sum(axis = -1)).mean()
 				
 		# 		mseloss = (next_particle_probs * sq_distance).sum(axis=-1).mean()
-				
 		# 		#mean_next_state = self.particles_to_state(next_particles, next_particle_probs)
 
 		# 		# update all parameters
@@ -305,26 +346,42 @@ class DPF():
 		# 		self.dynamic_model_optimizer.zero_grad()
 		# 		self.encoder_optimizer.zero_grad()
 		# 		self.obs_like_estimator_optimizer.zero_grad()
-		# 		self.particle_proposer_optimizer.zero_grad()
 		# 		e2e_loss.backward()
 		# 		self.mo_noise_generator_optimizer.step()
 		# 		self.dynamic_model_optimizer.step()
 		# 		self.encoder_optimizer.step()
 		# 		self.obs_like_estimator_optimizer.step()
-		# 		self.particle_proposer_optimizer.step()
 		# 		total_loss.append(e2e_loss.cpu().detach().numpy())
 		# 		sq_loss.append(mseloss.cpu().detach().numpy())
 		# 	print("epoch: %d, loss: %2.4f, %2.4f"  % (it, np.mean(total_loss), np.mean(sq_loss)))
+
+	def initial_particles(self, particles):
+		self.particles = torch.FloatTensor(particles).to(device)
+		self.particle_num = self.particles.shape[1]
+		self.particle_probs = torch.ones((1, self.particle_num)) / self.particle_num
+		self.particle_probs = self.particle_probs.to(device)
+
+	def update(self, action, obs):
+		action = torch.FloatTensor(action)[None, :].to(device) / self.action_scale
+		obs = torch.FloatTensor(obs) / self.observation_scale
+		action = action.to(device)
+		obs = obs.to(device)
+		with torch.no_grad():
+			new_particles, new_particle_probs = self.loop(self.particles, self.particle_probs, action, obs)
+		self.particles = new_particles
+		self.particle_probs = new_particle_probs
+
+		return (new_particles * self.state_scale).cpu(), self.particle_probs.cpu()
 
 	def load(self):
 		try:
 			if not os.path.exists("../weights/"):
 				os.mkdir("../weights/")
-			file_name = "../weights/DPF1.pt"
+			file_name = "../weights/DPF.pt"
 			checkpoint = torch.load(file_name)
 			self.encoder.load_state_dict(checkpoint["encoder"])
 			self.obs_like_estimator.load_state_dict(checkpoint["obs_like_estimator"])
-			self.particle_proposer.load_state_dict(checkpoint["particle_proposer"])
+			#self.particle_proposer.load_state_dict(checkpoint["particle_proposer"])
 			self.mo_noise_generator.load_state_dict(checkpoint["mo_noise_generator"])
 			self.dynamic_model.load_state_dict(checkpoint["dynamic_model"])
 			print("load model from " + file_name)
@@ -334,7 +391,7 @@ class DPF():
 	def save(self):
 		if not os.path.exists("../weights/"):
 			os.mkdir("../weights/")
-		file_name = "../weights/DPF1.pt"
+		file_name = "../weights/DPF.pt"
 		torch.save({"encoder" : self.encoder.state_dict(),
 					"obs_like_estimator" : self.obs_like_estimator.state_dict(),
 					"particle_proposer" : self.particle_proposer.state_dict(),
@@ -346,7 +403,9 @@ if __name__ == "__main__":
 	dataset = PFDataset()
 	loader = DataLoader(dataset, batch_size = 64, shuffle = True, num_workers = 4)
 
-	dpf = DPF()
-	for i in range(1):
-		dpf.train(loader, 50)
+	planning_env = CarEnvironment("../map/map.yaml")
+	dpf = DPF(env = planning_env)
+	for i in range(5):
+		dpf.train(loader, 20)
+		dpf.save()
 

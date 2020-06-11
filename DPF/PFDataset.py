@@ -10,7 +10,7 @@ class PFDataset(Dataset):
 		measurements = []
 		states = []
 		next_states = []
-		for i in range(500):
+		for i in range(200):
 			action = np.loadtxt("../data_rrt/action_%d.txt" % i)
 			measurement = np.loadtxt("../data_rrt/measure_%d.txt" % i)
 			rollout = np.loadtxt("../data_rrt/rollout_%d.txt" % i)

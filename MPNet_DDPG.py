@@ -2,7 +2,6 @@ import sys
 sys.path.append('Env')
 sys.path.append('MPNet')
 sys.path.append('DRL')
-sys.path.append('DPF')
 import numpy as np 
 import torch
 import argparse
@@ -10,7 +9,6 @@ import argparse
 from Env.CarEnvironment import CarEnvironment
 from MPNet import MPNet
 from DRL.DDPG import DDPG
-from DPF import DPF
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--env_name', default='Pendulum-v0')
@@ -47,9 +45,6 @@ def main():
     planning_env = CarEnvironment("map/map.yaml")
     planning_env.init_visualizer()
 
-    dpf = DPF(env = planning_env)
-    dpf.load()
-
     mpnet = MPNet()
     mpnet.load()
 
@@ -75,40 +70,32 @@ def main():
 
     #start = start[:2, :].T / size
     goal_resize = goal[:2, :].T / size
-    
+    # import IPython
+    # IPython.embed()
     last_angle = 0
-    obs = planning_env.setState(start)
-    particles = dpf.propose_batch(obs, 200)
-    dpf.initial_particles(particles)
-    start = (particles.mean(axis = 1).numpy() * np.array([[1780, 1240, 1]])).T
-
+    planning_env.setState(start)
     for t in range(500):
-        shift = int(np.round(start[2, 0] / np.pi * 180 / 2))
-        zero_obs = np.roll(obs, shift)
+        start_tile = np.tile(start, (1, 2))
+        print(start_tile)
+        start_tile[2, 0] = 0
+        obs = planning_env.get_measurement(start_tile)
 
         # MPnet
         start_goal = np.concatenate([start[:2, :].T / size, goal_resize], axis = 1)
-        delta = mpnet.predict(start_goal, zero_obs / 4.0)
+        delta = mpnet.predict(start_goal, obs[:1] / 4.0)
         delta = delta / 20. * size
         next_state = planning_env.steerTo(start[:2, :].T, delta)
         delta = next_state - start[:2, :].T
 
         # ddpg
         local_goal = np.dot(np.array([[np.cos(-start[2, 0]), -np.sin(-start[2, 0])], [np.sin(-start[2, 0]), np.cos(-start[2, 0])]]), delta.T)
-        action = agent.predict(obs / 4.0, local_goal.T / 20.)
+        action = agent.predict(obs[1:] / 4.0, local_goal.T / 20.)
 
         # execute action
         action[1] = 0.2 * action[1] + last_angle * 0.8
         last_angle = action[1]
-        _, obs = planning_env.step_action(action)
-        
-
-        # dpf update position
-        next_, prob = dpf.update(action, obs)
-        start = (next_ * prob[..., None]).sum(axis = 1).numpy().T
-
-
-        planning_env.render(particles = dpf.particles.cpu().numpy()*np.array([1788, 1240, 1.0]), dt = 0.00001)
+        start, _ = planning_env.step_action(action)
+        planning_env.render(dt = 0.00001)
 
 
 if __name__ == "__main__":
