@@ -478,7 +478,8 @@ class CarEnvironment(object):
         next_state[2] = next_state[2] % (2*np.pi)
 
         self.state = next_state
-        return self.state
+        observation = self.get_measurement(self.state)
+        return self.state, observation
 
     # for close loop
     def draw_start_goal(self, start, goal):

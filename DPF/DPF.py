@@ -6,11 +6,15 @@ from torch.utils.data import Dataset, DataLoader
 from PFDataset import PFDataset
 import os
 
+import sys
+sys.path.append('../Env')
+from CarEnvironment import CarEnvironment
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
 class DPF():
-	def __init__(self, particle_dim = 3, action_dim = 2, observation_dim = 180, particle_num = 16):
+	def __init__(self, particle_dim = 3, action_dim = 2, observation_dim = 180, particle_num = 16, env = None):
 		self.particle_dim = particle_dim
 		self.state_dim = 4 # augmented state dim
 		self.action_dim = action_dim
@@ -25,7 +29,7 @@ class DPF():
 		self.observation_scale = 4.0
 		self.delta_scale = torch.FloatTensor([2.0, 2.0, 20/7.5*np.tan(1.0)*0.1]).to(device)
 
-		self.env = None
+		self.env = env
 
 		self.build_model()
 
@@ -37,11 +41,6 @@ class DPF():
 									 nn.PReLU(),
 									 nn.Linear(128, 64)).to(device)
 		self.encoder_optimizer = torch.optim.Adam(self.encoder.parameters(), lr = self.learning_rate)
-
-		self.state_encoder = nn.Sequential(nn.Linear(self.state_dim, 32),
-										   nn.PReLU(),
-										   nn.Linear(32, 64)).to(device)
-		self.state_encoder_optimizer = torch.optim.Adam(self.state_encoder.parameters(), lr = self.learning_rate)
 
 		# observation likelihood estimator that maps states and observation encodings to probabilities
 		self.obs_like_estimator = nn.Sequential(nn.Linear(64+64, 128),
@@ -83,7 +82,7 @@ class DPF():
 										   nn.PReLU(),
 										   nn.Linear(128, 64),
 										   nn.PReLU(),
-										   nn.Linear(64, self.particle_dim),
+										   nn.Linear(64, 3),
 										   nn.Tanh()).to(device)
 		self.dynamic_model_optimizer = torch.optim.Adam(self.dynamic_model.parameters(), lr = self.learning_rate)
 
@@ -93,14 +92,14 @@ class DPF():
 							torch.cos(particles[..., 2:])), axis = -1)
 		return inputs
 
-	def measurement_update(self, encoding, particles):
+	def measurement_update(self, encoding, particle_encoding):
 		'''
 		Compute the likelihood of the encoded observation for each particle.
 		'''
-		particle_input = self.transform_particles_as_input(particles)
-		encoding_input = encoding[:, None, :].repeat((1, particle_input.shape[1], 1))
-		state_encoding = self.state_encoder(particle_input)
-		inputs = torch.cat((state_encoding, encoding_input), axis = -1)
+		#particle_input = self.transform_particles_as_input(particles)
+		encoding_input = encoding[:, None, :].repeat((1, particle_encoding.shape[1], 1))
+		#state_encoding = self.state_encoder(particle_input)
+		inputs = torch.cat((particle_encoding, encoding_input), axis = -1)
 		obs_likelihood = self.obs_like_estimator(inputs)
 		return obs_likelihood 
 
@@ -229,6 +228,7 @@ class DPF():
 		#TODO can train dynamic and measurement at the same time...
 		print("training motion model...")
 		#self.load()
+		
 		for it in range(max_iter):
 			total_loss = []
 			for _, (states, actions, measurements, next_states, deltas) in enumerate(loader):
@@ -239,6 +239,7 @@ class DPF():
 				states = states[:, None, :]
 
 				delta_pred = self.motion_update(states, actions, training = True)
+
 				dynamic_loss = mseLoss(delta_pred.squeeze(), deltas)
 
 				self.mo_noise_generator_optimizer.zero_grad()
@@ -255,12 +256,14 @@ class DPF():
 			total_loss = []
 			for _, (states, actions, measurements, next_states, deltas) in enumerate(loader):
 				batch_size = states.shape[0]
-
+				particle_obs = torch.FloatTensor(self.env.get_measurement((next_states * self.state_scale.cpu()).numpy().T))
+				particle_encoding = self.encoder(particle_obs.to(device) / 4.0)
+				particle_encoding = particle_encoding[None, ...].repeat(batch_size, 1, 1)
 				state_repeat = next_states[None, ...].repeat(batch_size, 1, 1)
 				state_repeat = state_repeat.float().to(device)
 				measurements = measurements.float().to(device)
 				encoding = self.encoder(measurements)
-				measurement_model_out = self.measurement_update(encoding, state_repeat).squeeze().cpu()
+				measurement_model_out = self.measurement_update(encoding, particle_encoding).squeeze().cpu()
 
 				# measure_loss = -torch.mul(torch.eye(batch_size), torch.log(measurement_model_out + 1e-16))/batch_size -  \
 				# 				torch.mul(1.0-torch.eye(batch_size), torch.log(1.0-measurement_model_out + 1e-16))/(batch_size**2-batch_size)
@@ -274,11 +277,9 @@ class DPF():
 				measure_loss_mean = measure_loss.sum()
 
 				self.encoder_optimizer.zero_grad()
-				self.state_encoder_optimizer.zero_grad()
 				self.obs_like_estimator_optimizer.zero_grad()
 				measure_loss_mean.backward()
 				self.encoder_optimizer.step()
-				self.state_encoder_optimizer.step()
 				self.obs_like_estimator_optimizer.step()
 				total_loss.append(measure_loss_mean.detach().cpu().numpy())
 			print("epoch: %d, loss: %2.6f" % (it, np.mean(total_loss)))
@@ -371,10 +372,9 @@ class DPF():
 		try:
 			if not os.path.exists("../weights/"):
 				os.mkdir("../weights/")
-			file_name = "../weights/DPFfocal.pt"
+			file_name = "../weights/DPF.pt"
 			checkpoint = torch.load(file_name)
 			self.encoder.load_state_dict(checkpoint["encoder"])
-			self.state_encoder.load_state_dict(checkpoint["state_encoder"])
 			self.obs_like_estimator.load_state_dict(checkpoint["obs_like_estimator"])
 			self.particle_proposer.load_state_dict(checkpoint["particle_proposer"])
 			self.mo_noise_generator.load_state_dict(checkpoint["mo_noise_generator"])
@@ -386,9 +386,8 @@ class DPF():
 	def save(self):
 		if not os.path.exists("../weights/"):
 			os.mkdir("../weights/")
-		file_name = "../weights/DPFfocal.pt"
+		file_name = "../weights/DPF.pt"
 		torch.save({"encoder" : self.encoder.state_dict(),
-					"state_encoder" : self.state_encoder.state_dict(),
 					"obs_like_estimator" : self.obs_like_estimator.state_dict(),
 					"particle_proposer" : self.particle_proposer.state_dict(),
 					"mo_noise_generator" : self.mo_noise_generator.state_dict(),
@@ -399,9 +398,10 @@ if __name__ == "__main__":
 	dataset = PFDataset()
 	loader = DataLoader(dataset, batch_size = 64, shuffle = True, num_workers = 4)
 
-	dpf = DPF()
-	dpf.load()
-	for i in range(1):
-		dpf.train(loader, 50)
+	planning_env = CarEnvironment("../map/map.yaml")
+	dpf = DPF(env = planning_env)
+	dpf.save()
+	for i in range(5):
+		dpf.train(loader, 20)
 		dpf.save()
 

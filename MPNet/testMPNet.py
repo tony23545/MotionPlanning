@@ -9,7 +9,7 @@ if __name__ == "__main__":
     mpnet = MPNet()
     mpnet.load()
 
-    planning_env = CarEnvironment("map/map.png")
+    planning_env = CarEnvironment("../map/map.png")
     planning_env.init_visualizer()
 
     size = np.array([1788, 1240])

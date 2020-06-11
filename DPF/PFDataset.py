@@ -36,11 +36,11 @@ class PFDataset(Dataset):
 		self.deltas = self.deltas / np.array([2, 2, 20/7.5*np.tan(1.0)*0.1]) # [-1, 1]
 
 		# downsample
-		self.states = self.states[::5]
-		self.actions = self.actions[::5]
-		self.measurements = self.measurements[::5]
-		self.next_states = self.next_states[::5]
-		self.deltas = self.deltas[::5]
+		self.states = self.states[::10]
+		self.actions = self.actions[::10]
+		self.measurements = self.measurements[::10]
+		self.next_states = self.next_states[::10]
+		self.deltas = self.deltas[::10]
 
 	def __len__(self):
 		return self.actions.shape[0]
