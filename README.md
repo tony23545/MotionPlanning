@@ -6,6 +6,16 @@ This is our final project for [Probabilistic Robotics](https://courses.cs.washin
 - [Motion Planning Networks](https://arxiv.org/pdf/1806.05767.pdf) for global path planning.
 - [Deep Deterministic Policy Gradient](https://arxiv.org/pdf/1509.02971.pdf) for local control.
 
-link to the dataset:  
+### run the whole pipeline
+```
+python main.py
+```
+### run MPNet and DDPG with ground truth position
+```
+python MPNet_DDPG.py
+```
+run the individual module, go to the corresponding folder.
+
+### link to the dataset:  
 [rrt* dataset](https://drive.google.com/file/d/1vxX_vBrSBq0mhWsP4usxvzGPjFI33Grp/view?usp=sharing)
  
