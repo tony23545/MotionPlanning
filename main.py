@@ -69,6 +69,8 @@ def main():
         if planning_env.state_validity_checker(goal) and dist > 200 and dist < 2000:
             break
 
+    start = np.array([[700, 300, 0.0]]).T
+    goal = np.array([[400, 600, 0.0]]).T
     print(start[:2, 0])
     print(goal[:2, 0])
     planning_env.draw_start_goal(start[:2, 0], goal[:2, 0])
@@ -82,20 +84,22 @@ def main():
     dpf.initial_particles(particles)
     start = (particles.mean(axis = 1).numpy() * np.array([[1780, 1240, 1]])).T
 
-    for t in range(500):
+    for t in range(1000):
         shift = int(np.round(start[2, 0] / np.pi * 180 / 2))
         zero_obs = np.roll(obs, shift)
 
         # MPnet
-        start_goal = np.concatenate([start[:2, :].T / size, goal_resize], axis = 1)
-        delta = mpnet.predict(start_goal, zero_obs / 4.0)
-        delta = delta / 20. * size
-        next_state = planning_env.steerTo(start[:2, :].T, delta)
-        delta = next_state - start[:2, :].T
+        if t % 6 == 0:
+            start_goal = np.concatenate([start[:2, :].T / size, goal_resize], axis = 1)
+            delta = mpnet.predict(start_goal, zero_obs / 4.0)
+            delta = delta / 20. * size
+            next_state = planning_env.steerTo(start[:2, :].T, delta)
+            delta = next_state - start[:2, :].T
 
         # ddpg
-        local_goal = np.dot(np.array([[np.cos(-start[2, 0]), -np.sin(-start[2, 0])], [np.sin(-start[2, 0]), np.cos(-start[2, 0])]]), delta.T)
-        action = agent.predict(obs / 4.0, local_goal.T / 20.)
+        if t % 2 == 0:
+            local_goal = np.dot(np.array([[np.cos(-start[2, 0]), -np.sin(-start[2, 0])], [np.sin(-start[2, 0]), np.cos(-start[2, 0])]]), delta.T)
+            action = agent.predict(obs / 4.0, local_goal.T / 20.)
 
         # execute action
         action[1] = 0.2 * action[1] + last_angle * 0.8

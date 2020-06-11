@@ -76,16 +76,16 @@ def main():
     planning_env.setState(start)
     for t in range(500):
         start_tile = np.tile(start, (1, 2))
-        print(start_tile)
         start_tile[2, 0] = 0
         obs = planning_env.get_measurement(start_tile)
 
         # MPnet
-        start_goal = np.concatenate([start[:2, :].T / size, goal_resize], axis = 1)
-        delta = mpnet.predict(start_goal, obs[:1] / 4.0)
-        delta = delta / 20. * size
-        next_state = planning_env.steerTo(start[:2, :].T, delta)
-        delta = next_state - start[:2, :].T
+        if t % 5 == 0:
+            start_goal = np.concatenate([start[:2, :].T / size, goal_resize], axis = 1)
+            delta = mpnet.predict(start_goal, obs[:1] / 4.0)
+            delta = delta / 20. * size
+            next_state = planning_env.steerTo(start[:2, :].T, delta)
+            delta = next_state - start[:2, :].T
 
         # ddpg
         local_goal = np.dot(np.array([[np.cos(-start[2, 0]), -np.sin(-start[2, 0])], [np.sin(-start[2, 0]), np.cos(-start[2, 0])]]), delta.T)

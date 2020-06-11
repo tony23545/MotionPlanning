@@ -7,7 +7,6 @@ from PFDataset import PFDataset
 import os
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(device)
 
 class DPF():
 	def __init__(self, particle_dim = 3, action_dim = 2, observation_dim = 180, particle_num = 16, env = None):
@@ -196,13 +195,19 @@ class DPF():
 		deltas = self.motion_update(particles, actions)
 		particles = particles + deltas * self.delta_scale / self.state_scale
 
+		# manually clear invalid particles 
+		temp = (particles[0] * torch.FloatTensor([[1780, 1240, 1]])).numpy().T
+		for i in range(particles.shape[1]):
+			if not self.env.state_validity_checker(temp[:, i:(i+1)]):
+				particle_probs[0, i] = 0.0
+
 		# observation update
 		likelihood = (self.measurement_update(encoding, particles).squeeze()+1e-16)
 		#print(likelihood.max())
 		particle_probs = particle_probs * likelihood # unnormalized
 
 		if likelihood.max() < 0.9:
-			propose_ratio = 0.3
+			propose_ratio = 0.2
 		else:
 			propose_ratio = 0.00
 
@@ -388,7 +393,7 @@ class DPF():
 		try:
 			if file_name is None:
 				file_name = "weights/DPFfocal.pt"
-			checkpoint = torch.load(file_name)
+			checkpoint = torch.load(file_name, map_location=torch.device(device))
 			self.encoder.load_state_dict(checkpoint["encoder"])
 			self.state_encoder.load_state_dict(checkpoint["state_encoder"])
 			self.obs_like_estimator.load_state_dict(checkpoint["obs_like_estimator"])
@@ -400,8 +405,6 @@ class DPF():
 			print("fail to load model! ")
 
 	def save(self):
-		if not os.path.exists("weights/"):
-			os.mkdir("weights/")
 		file_name = "weights/DPFfocal.pt"
 		torch.save({"encoder" : self.encoder.state_dict(),
 					"state_encoder" : self.state_encoder.state_dict(),
